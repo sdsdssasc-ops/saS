@@ -6,7 +6,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("MTU1OTE2NzkxNDg0OTA3NTI0MA.GEN0Tm.I8AzsM9Tk5yKylMIN7eCrOc-JZyb8p6hDa2T-Q")
 
 intents = discord.Intents.default()
 intents.members = True  # لازم تفعّله من Developer Portal
