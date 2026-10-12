@@ -6,7 +6,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, features
 
 BASE = Path(__file__).parent
-ASSETS = BASE / "assets"
+# يشتغل سواء حطيت الملفات في مجلد assets أو مباشرة بجانب الكود
+ASSETS = BASE / "assets" if (BASE / "assets").is_dir() else BASE
 
 # ====== إعدادات تقدر تغيرها ======
 GAME_TITLE = "TIME BOMB"
