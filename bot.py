@@ -41,6 +41,7 @@ async def start_web_server():
 class MyBot(commands.Bot):
     async def setup_hook(self):
         await start_web_server()
+        await self.load_extension("leaderboard")
 
 
 bot = MyBot(command_prefix="!", intents=intents)
