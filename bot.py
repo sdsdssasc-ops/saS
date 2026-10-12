@@ -2,6 +2,7 @@ import os
 import discord
 from discord import app_commands
 from discord.ext import commands
+from aiohttp import web
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,7 +11,23 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 intents = discord.Intents.default()
 intents.members = True  # لازم تفعّله من Developer Portal
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+async def start_web_server():
+    # سيرفر صغير عشان Render (Web Service) يشوف بورت مفتوح، ونقدر نسوي له ping
+    app = web.Application()
+    app.router.add_get("/", lambda request: web.Response(text="OK"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000))).start()
+
+
+class MyBot(commands.Bot):
+    async def setup_hook(self):
+        await start_web_server()
+
+
+bot = MyBot(command_prefix="!", intents=intents)
 
 
 @bot.event
