@@ -73,4 +73,4 @@ async def on_error(interaction: discord.Interaction, error: app_commands.AppComm
         raise error
 
 
-bot.run(TOKUN)
+bot.run(TOKEN)
