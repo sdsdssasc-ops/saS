@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import traceback
 from pathlib import Path
 
 import discord
@@ -38,7 +39,15 @@ class Leaderboard(commands.Cog):
             await interaction.response.send_message("ما فيه لاعبين بعد. استخدم /lb_set عشان تضيف.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        png = await asyncio.to_thread(leaderboard_image.render, players)
+        try:
+            png = await asyncio.to_thread(leaderboard_image.render, players)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            await interaction.followup.send(
+                f"صار خطأ وأنا أرسم الصورة: `{type(e).__name__}: {e}`\nغالباً ملف ناقص (logo.png أو الخطوط) بجانب bot.py.",
+                ephemeral=True,
+            )
+            return
         try:
             await channel.send(file=discord.File(fp=io.BytesIO(png), filename="leaderboard.png"))
         except discord.Forbidden:
