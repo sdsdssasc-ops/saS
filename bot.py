@@ -6,7 +6,23 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 load_dotenv()
-TOKEN = os.getenv("MTU1OTE2NzkxNDg0OTA3NTI0MA.GEN0Tm.I8AzsM9Tk5yKylMIN7eCrOc-JZyb8p6hDa2T-Q")
+load_dotenv("/etc/secrets/.env")  # لو حطيت التوكن كـ Secret File في Render
+
+
+def find_token():
+    # يدور على المتغير حتى لو الاسم فيه مسافات أو حروف صغيرة
+    for key, value in os.environ.items():
+        if key.strip().upper() == "DISCORD_TOKEN" and value.strip():
+            return value.strip().strip('"').strip("'")
+    return None
+
+
+TOKEN = find_token()
+if not TOKEN:
+    ignore = ("PATH", "HOME", "PWD", "LANG", "PYTHON", "RENDER", "PORT", "WEB_", "POETRY", "VIRTUAL", "SHLVL", "_", "HOSTNAME", "IS_PULL", "PIP", "OLDPWD", "TERM", "USER")
+    names = [k for k in os.environ if not k.upper().startswith(ignore)]
+    print("خطأ: ما لقيت DISCORD_TOKEN. أسماء المتغيرات اللي أشوفها (بدون قيمها):", names)
+    raise SystemExit(1)
 
 intents = discord.Intents.default()
 intents.members = True  # لازم تفعّله من Developer Portal
