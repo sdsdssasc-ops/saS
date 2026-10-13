@@ -2,11 +2,13 @@
 import asyncio
 import io
 import json
+import os
 import re
 import traceback
 from pathlib import Path
 from typing import Optional
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -26,6 +28,9 @@ STATE_FILE = DATA_DIR / "state.json"  # الروم والرسالة اللي ف�
 
 ROBLOX_PREFIX = re.compile(r"^https?://(www\.)?(roblox\.com|ro\.blox\.com)/", re.I)
 SCORE_RE = re.compile(r"^\s*(\d{1,2})\s*[-–—:]\s*(\d{1,2})\s*$")
+
+# اسم حساب روبلوكس لكل لاعب (يتعبى من Bloxlink لو حطيت BLOXLINK_API_KEY)
+ROBLOX_NAMES: dict[int, str] = {}
 
 
 def _load(path: Path) -> dict:
@@ -57,7 +62,7 @@ def find_key(data: dict, name: str) -> str:
 
 
 def names(users) -> str:
-    return "، ".join(u.display_name for u in users) or "—"
+    return "، ".join(ROBLOX_NAMES.get(u.id, u.display_name) for u in users) or "—"
 
 
 class Lobby:
@@ -290,12 +295,58 @@ class Leaderboard(commands.Cog):
             f"اضغط زر **تسجيل {n}V{n}** في اللوحة فوق عشان تنضم."
         )
 
+    # ---------- ربط حساب روبلوكس (Bloxlink) ----------
+    async def _bloxlink_lookup(self, guild_id: int, user_id: int, key: str) -> Optional[str]:
+        timeout = aiohttp.ClientTimeout(total=2.5)  # لازم نرد على ديسكورد خلال 3 ثواني
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            url = f"https://api.blox.link/v4/public/guilds/{guild_id}/discord-to-roblox/{user_id}"
+            async with session.get(url, headers={"Authorization": key}) as r:
+                if r.status == 404:
+                    return None
+                if r.status != 200:
+                    raise RuntimeError(f"Bloxlink status {r.status}")
+                data = await r.json()
+            roblox_id = data.get("robloxID") or data.get("robloxId")
+            if not roblox_id:
+                return None
+            resolved = (data.get("resolved") or {}).get("roblox") or {}
+            if resolved.get("name"):
+                return resolved["name"]
+            async with session.get(f"https://users.roblox.com/v1/users/{roblox_id}") as r:
+                if r.status == 200:
+                    return (await r.json()).get("name") or f"Roblox {roblox_id}"
+            return f"Roblox {roblox_id}"
+
+    async def _check_link(self, interaction: discord.Interaction) -> bool:
+        """لو BLOXLINK_API_KEY موجود، نطلب من اللاعب يكون رابط حسابه في Bloxlink."""
+        key = os.getenv("BLOXLINK_API_KEY")
+        if not key or interaction.user.id in ROBLOX_NAMES:
+            return True
+        try:
+            name = await self._bloxlink_lookup(interaction.guild_id, interaction.user.id, key)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            await interaction.response.send_message(
+                "ما قدرت أتحقق من حسابك في Bloxlink الحين. جرب مرة ثانية بعد شوي.", ephemeral=True
+            )
+            return False
+        if not name:
+            await interaction.response.send_message(
+                "لازم تربط حسابك في روبلوكس أول. اكتب `/verify` (بوت Bloxlink) وبعدها اضغط زر التسجيل من جديد.",
+                ephemeral=True,
+            )
+            return False
+        ROBLOX_NAMES[interaction.user.id] = name
+        return True
+
     # ---------- التسجيل ----------
     async def on_mode(self, interaction: discord.Interaction, size: int):
         if interaction.user.id in self.busy:
             await interaction.response.send_message(
                 "أنت مسجل بلوبي أو مباراة الحين. خلّصها أو اطلب من الإدارة `/pvp_reset`.", ephemeral=True
             )
+            return
+        if not await self._check_link(interaction):
             return
         lobby = self.lobbies.get((interaction.guild_id, size))
         if lobby is None:
@@ -437,7 +488,7 @@ class Leaderboard(commands.Cog):
         for u in winners + losers:
             key = f"id:{u.id}"
             rec = data.get(key, {"points": 0, "streak": 0, "best": 0})
-            rec["name"] = u.display_name
+            rec["name"] = ROBLOX_NAMES.get(u.id, u.display_name)
             if u in winners:
                 rec["points"] += WIN_POINTS
                 rec["streak"] += 1
