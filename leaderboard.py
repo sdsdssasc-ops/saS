@@ -297,7 +297,7 @@ class Leaderboard(commands.Cog):
 
     # ---------- ربط حساب روبلوكس (Bloxlink) ----------
     async def _bloxlink_lookup(self, guild_id: int, user_id: int, key: str) -> Optional[str]:
-        timeout = aiohttp.ClientTimeout(total=2.5)  # لازم نرد على ديسكورد خلال 3 ثواني
+        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             url = f"https://api.blox.link/v4/public/guilds/{guild_id}/discord-to-roblox/{user_id}"
             async with session.get(url, headers={"Authorization": key}) as r:
@@ -322,22 +322,28 @@ class Leaderboard(commands.Cog):
         key = os.getenv("BLOXLINK_API_KEY")
         if not key or interaction.user.id in ROBLOX_NAMES:
             return True
+        await interaction.response.defer(ephemeral=True)  # عشان ما نتقيد بـ 3 ثواني
         try:
             name = await self._bloxlink_lookup(interaction.guild_id, interaction.user.id, key)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             traceback.print_exc()
-            await interaction.response.send_message(
-                "ما قدرت أتحقق من حسابك في Bloxlink الحين. جرب مرة ثانية بعد شوي.", ephemeral=True
+            await interaction.followup.send(
+                f"ما قدرت أتحقق من حسابك في Bloxlink الحين.\nالسبب: `{type(e).__name__}: {e}`\n"
+                "لو تكرر، تأكد من المفتاح `BLOXLINK_API_KEY` في رندر.",
+                ephemeral=True,
             )
             return False
         if not name:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "لازم تربط حسابك في روبلوكس أول. اكتب `/verify` (بوت Bloxlink) وبعدها اضغط زر التسجيل من جديد.",
                 ephemeral=True,
             )
             return False
         ROBLOX_NAMES[interaction.user.id] = name
-        return True
+        await interaction.followup.send(
+            f"تم التحقق من حسابك: **{name}** ✅\nاضغط زر التسجيل مرة ثانية عشان تكمل.", ephemeral=True
+        )
+        return False  # أول مرة فقط، المرة الجاية يمشي مباشرة
 
     # ---------- التسجيل ----------
     async def on_mode(self, interaction: discord.Interaction, size: int):
