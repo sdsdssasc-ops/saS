@@ -319,7 +319,7 @@ class Leaderboard(commands.Cog):
 
     async def _check_link(self, interaction: discord.Interaction) -> bool:
         """لو BLOXLINK_API_KEY موجود، نطلب من اللاعب يكون رابط حسابه في Bloxlink."""
-        key = os.getenv("BLOXLINK_API_KEY")
+        key = (os.getenv("BLOXLINK_API_KEY") or "").strip().strip("\"'")  # ينظف المسافات والتنصيص
         if not key or interaction.user.id in ROBLOX_NAMES:
             return True
         await interaction.response.defer(ephemeral=True)  # عشان ما نتقيد بـ 3 ثواني
