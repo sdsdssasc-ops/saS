@@ -10,11 +10,11 @@ BASE = Path(__file__).parent
 ASSETS = BASE / "assets" if (BASE / "assets").is_dir() else BASE
 
 # ====== إعدادات تقدر تغيرها ======
-GAME_TITLE = "TIME BOMB"
+GAME_TITLE = "Abyss server"
 SUBTITLE = "Abyss"
 HEADER_RIGHT = "RANKINGS"
 FOOTER_LEFT = "ABYSS SERVER"
-FOOTER_RIGHT = "TIME BOMB  /  RANKED"
+FOOTER_RIGHT = "PVP  /  RANKED"
 GOLD_MIN = 400    # نقاط الرتبة Gold وفوق
 SILVER_MIN = 200  # نقاط الرتبة Silver وفوق، وتحتها Bronze
 # ================================
