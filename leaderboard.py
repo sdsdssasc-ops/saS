@@ -2,8 +2,8 @@
 import asyncio
 import io
 import json
-import os
 import re
+import secrets
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -25,11 +25,12 @@ MAX_MISMATCHES = 3       # كم مرة نسمح بنتيجتين مختلفتي�
 DATA_DIR = Path(__file__).parent / "data"
 DATA_FILE = DATA_DIR / "players.json"
 STATE_FILE = DATA_DIR / "state.json"  # الروم والرسالة اللي فيها الليدربورد
+LINKS_FILE = DATA_DIR / "links.json"  # ربط حساب ديسكورد بحساب روبلوكس
 
 ROBLOX_PREFIX = re.compile(r"^https?://(www\.)?(roblox\.com|ro\.blox\.com)/", re.I)
 SCORE_RE = re.compile(r"^\s*(\d{1,2})\s*[-–—:]\s*(\d{1,2})\s*$")
 
-# اسم حساب روبلوكس لكل لاعب (يتعبى من Bloxlink لو حطيت BLOXLINK_API_KEY)
+# اسم حساب روبلوكس لكل لاعب (يتعبى من /verify)
 ROBLOX_NAMES: dict[int, str] = {}
 
 
@@ -224,6 +225,20 @@ class ResultView(discord.ui.View):
             await interaction.response.send_modal(ScoreModal(self.cog, self.match, False))
 
 
+class VerifyView(discord.ui.View):
+    def __init__(self, cog, user_id: int):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.user_id = user_id
+
+    @discord.ui.button(label="تحقق ✅", style=discord.ButtonStyle.success)
+    async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("هذا الزر لصاحب الطلب.", ephemeral=True)
+            return
+        await self.cog.confirm_verify(interaction)
+
+
 # ---------------------------------------------------------------- الكوج
 
 class Leaderboard(commands.Cog):
@@ -232,9 +247,12 @@ class Leaderboard(commands.Cog):
         self.lock = asyncio.Lock()
         self.lobbies: dict[tuple, Lobby] = {}
         self.busy: dict[int, object] = {}  # user_id -> Lobby أو Match
+        self.pending: dict[int, dict] = {}  # محاولات /verify الجارية
 
     async def cog_load(self):
         self.bot.add_view(PanelView(self))  # عشان الأزرار تظل تشتغل بعد إعادة التشغيل
+        for did, rec in _load(LINKS_FILE).items():
+            ROBLOX_NAMES[int(did)] = rec.get("name", "")
 
     # ---------- صورة الليدربورد ----------
     async def _render_file(self) -> discord.File:
@@ -295,55 +313,74 @@ class Leaderboard(commands.Cog):
             f"اضغط زر **تسجيل {n}V{n}** في اللوحة فوق عشان تنضم."
         )
 
-    # ---------- ربط حساب روبلوكس (Bloxlink) ----------
-    async def _bloxlink_lookup(self, guild_id: int, user_id: int, key: str) -> Optional[str]:
+    # ---------- ربط حساب روبلوكس (/verify) ----------
+    async def _roblox_find(self, username: str) -> Optional[tuple]:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            url = f"https://api.blox.link/v4/public/guilds/{guild_id}/discord-to-roblox/{user_id}"
-            async with session.get(url, headers={"Authorization": key}) as r:
-                if r.status == 404:
-                    return None
+            async with session.post(
+                "https://users.roblox.com/v1/usernames/users",
+                json={"usernames": [username], "excludeBannedUsers": True},
+            ) as r:
                 if r.status != 200:
-                    raise RuntimeError(f"Bloxlink status {r.status}")
+                    raise RuntimeError(f"Roblox status {r.status}")
                 data = await r.json()
-            roblox_id = data.get("robloxID") or data.get("robloxId")
-            if not roblox_id:
-                return None
-            resolved = (data.get("resolved") or {}).get("roblox") or {}
-            if resolved.get("name"):
-                return resolved["name"]
-            async with session.get(f"https://users.roblox.com/v1/users/{roblox_id}") as r:
-                if r.status == 200:
-                    return (await r.json()).get("name") or f"Roblox {roblox_id}"
-            return f"Roblox {roblox_id}"
+        items = data.get("data") or []
+        if not items:
+            return None
+        return int(items[0]["id"]), items[0]["name"]
+
+    async def _roblox_description(self, user_id: int) -> str:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as r:
+                if r.status != 200:
+                    raise RuntimeError(f"Roblox status {r.status}")
+                return (await r.json()).get("description") or ""
 
     async def _check_link(self, interaction: discord.Interaction) -> bool:
-        """لو BLOXLINK_API_KEY موجود، نطلب من اللاعب يكون رابط حسابه في Bloxlink."""
-        key = (os.getenv("BLOXLINK_API_KEY") or "").strip().strip("\"'")  # ينظف المسافات والتنصيص
-        if not key or interaction.user.id in ROBLOX_NAMES:
+        """لازم اللاعب يكون سوّى /verify قبل ما يسجل."""
+        if interaction.user.id in ROBLOX_NAMES:
             return True
-        await interaction.response.defer(ephemeral=True)  # عشان ما نتقيد بـ 3 ثواني
+        await interaction.response.send_message(
+            "لازم تربط حسابك في روبلوكس أول. اكتب `/verify` وبعدها اضغط زر التسجيل من جديد.", ephemeral=True
+        )
+        return False
+
+    async def confirm_verify(self, interaction: discord.Interaction):
+        pend = self.pending.get(interaction.user.id)
+        if not pend:
+            await interaction.response.send_message("انتهت المحاولة. اكتب `/verify` من جديد.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
         try:
-            name = await self._bloxlink_lookup(interaction.guild_id, interaction.user.id, key)
+            description = await self._roblox_description(pend["roblox_id"])
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
+            await interaction.followup.send(f"ما قدرت أقرأ حسابك من روبلوكس الحين: `{type(e).__name__}: {e}`", ephemeral=True)
+            return
+        if pend["code"] not in description:
             await interaction.followup.send(
-                f"ما قدرت أتحقق من حسابك في Bloxlink الحين.\nالسبب: `{type(e).__name__}: {e}`\n"
-                "لو تكرر، تأكد من المفتاح `BLOXLINK_API_KEY` في رندر.",
+                "ما لقيت الكود في وصف حسابك. تأكد إنك حفظت التغيير وإن الكود مكتوب كامل، وانتظر ثواني وجرب تضغط **تحقق** مرة ثانية.",
                 ephemeral=True,
             )
-            return False
-        if not name:
-            await interaction.followup.send(
-                "لازم تربط حسابك في روبلوكس أول. اكتب `/verify` (بوت Bloxlink) وبعدها اضغط زر التسجيل من جديد.",
-                ephemeral=True,
-            )
-            return False
-        ROBLOX_NAMES[interaction.user.id] = name
+            return
+        links = _load(LINKS_FILE)
+        for did, rec in links.items():
+            if rec.get("roblox_id") == pend["roblox_id"] and did != str(interaction.user.id):
+                await interaction.followup.send("هذا الحساب انربط بشخص ثاني قبل شوي. كلم الإدارة.", ephemeral=True)
+                return
+        links[str(interaction.user.id)] = {"roblox_id": pend["roblox_id"], "name": pend["name"]}
+        _save(LINKS_FILE, links)
+        ROBLOX_NAMES[interaction.user.id] = pend["name"]
+        self.pending.pop(interaction.user.id, None)
         await interaction.followup.send(
-            f"تم التحقق من حسابك: **{name}** ✅\nاضغط زر التسجيل مرة ثانية عشان تكمل.", ephemeral=True
+            f"تم ربط حسابك: **{pend['name']}** ✅\nتقدر تحذف الكود من وصفك، وتسجل بالمباريات الحين.", ephemeral=True
         )
-        return False  # أول مرة فقط، المرة الجاية يمشي مباشرة
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if not member.bot:
+            await self._dm(member, "أهلاً! قبل ما تسجل في المباريات اربط حسابك في روبلوكس: اكتب `/verify` في السيرفر.")
 
     # ---------- التسجيل ----------
     async def on_mode(self, interaction: discord.Interaction, size: int):
@@ -553,6 +590,52 @@ class Leaderboard(commands.Cog):
                 obj.done = True
         self.busy.clear()
         await interaction.followup.send("تم تصفير كل اللوبيات والمباريات ✅", ephemeral=True)
+
+    @app_commands.command(name="verify", description="اربط حسابك في روبلوكس بحسابك في ديسكورد")
+    @app_commands.describe(roblox_username="اسم حسابك في روبلوكس (Username)")
+    async def verify(self, interaction: discord.Interaction, roblox_username: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            found = await self._roblox_find(roblox_username.strip())
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            await interaction.followup.send(f"ما قدرت أتصل بروبلوكس الحين: `{type(e).__name__}: {e}`", ephemeral=True)
+            return
+        if not found:
+            await interaction.followup.send(
+                "ما لقيت حساب بهذا الاسم. تأكد إنه الـ Username (مو الاسم المعروض Display Name).", ephemeral=True
+            )
+            return
+        roblox_id, roblox_name = found
+        for did, rec in _load(LINKS_FILE).items():
+            if rec.get("roblox_id") == roblox_id and did != str(interaction.user.id):
+                await interaction.followup.send("هذا الحساب مربوط بشخص ثاني. لو هو حسابك كلم الإدارة.", ephemeral=True)
+                return
+        code = "TB-" + secrets.token_hex(3).upper()
+        self.pending[interaction.user.id] = {"roblox_id": roblox_id, "name": roblox_name, "code": code}
+        await interaction.followup.send(
+            f"حساب روبلوكس: **{roblox_name}**\n"
+            "1️⃣ افتح روبلوكس وادخل حسابك، روح لملفك الشخصي (Profile)، وعدّل الوصف (About).\n"
+            f"2️⃣ الصق هذا الكود في الوصف واحفظ:\n```{code}```\n"
+            "3️⃣ ارجع هنا واضغط **تحقق**. (بعدها تقدر تحذف الكود)",
+            view=VerifyView(self, interaction.user.id),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="unlink", description="يفك ربط حساب روبلوكس (للإدارة: تقدر تحدد لاعب)")
+    @app_commands.describe(member="اللاعب (للإدارة فقط، اتركه فاضي لحسابك)")
+    async def unlink(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        target = member or interaction.user
+        if target.id != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("بس الإدارة تقدر تفك ربط لاعب ثاني.", ephemeral=True)
+            return
+        links = _load(LINKS_FILE)
+        if links.pop(str(target.id), None) is None:
+            await interaction.response.send_message("ما فيه حساب روبلوكس مربوط.", ephemeral=True)
+            return
+        _save(LINKS_FILE, links)
+        ROBLOX_NAMES.pop(target.id, None)
+        await interaction.response.send_message(f"تم فك ربط {target.display_name} ✅", ephemeral=True)
 
     @app_commands.command(name="lb_set", description="يضيف لاعب أو يعدل نقاطه وسلسلة فوزه يدوياً")
     @app_commands.describe(name="اسم اللاعب", points="النقاط", streak="سلسلة الفوز الحالية", best="أفضل سلسلة (اختياري)")
