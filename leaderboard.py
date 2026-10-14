@@ -4,6 +4,7 @@ import io
 import json
 import re
 import secrets
+import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -32,6 +33,7 @@ SCORE_RE = re.compile(r"^\s*(\d{1,2})\s*[-–—:]\s*(\d{1,2})\s*$")
 
 # اسم حساب روبلوكس لكل لاعب (يتعبى من /verify)
 ROBLOX_NAMES: dict[int, str] = {}
+ROBLOX_IDS: dict[int, int] = {}  # رقم حساب روبلوكس لكل لاعب (للصور والأسماء)
 
 
 def _load(path: Path) -> dict:
@@ -248,16 +250,62 @@ class Leaderboard(commands.Cog):
         self.lobbies: dict[tuple, Lobby] = {}
         self.busy: dict[int, object] = {}  # user_id -> Lobby أو Match
         self.pending: dict[int, dict] = {}  # محاولات /verify الجارية
+        self.profile_cache: dict[int, tuple] = {}  # roblox_id -> (وقت, اسم معروض, يوزر)
+        self.avatar_cache: dict[int, tuple] = {}  # roblox_id -> (وقت, صورة)
 
     async def cog_load(self):
         self.bot.add_view(PanelView(self))  # عشان الأزرار تظل تشتغل بعد إعادة التشغيل
         for did, rec in _load(LINKS_FILE).items():
             ROBLOX_NAMES[int(did)] = rec.get("name", "")
+            if rec.get("roblox_id"):
+                ROBLOX_IDS[int(did)] = int(rec["roblox_id"])
 
     # ---------- صورة الليدربورد ----------
+    async def _enrich(self, players: list) -> tuple:
+        """يجيب الاسم المعروض (Nickname) وصورة كل لاعب من روبلوكس، ولو فشل نكمل بالمخزن."""
+        ids = sorted({p["roblox_id"] for p in players if p.get("roblox_id")})[:100]
+        if not ids:
+            return players, {}
+        now = time.time()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                need = [i for i in ids if now - self.profile_cache.get(i, (0,))[0] > 1800]
+                if need:
+                    async with session.post(
+                        "https://users.roblox.com/v1/users", json={"userIds": need, "excludeBannedUsers": False}
+                    ) as r:
+                        if r.status == 200:
+                            for u in (await r.json()).get("data", []):
+                                self.profile_cache[u["id"]] = (now, u.get("displayName") or u["name"], u["name"])
+                need = [i for i in ids if now - self.avatar_cache.get(i, (0,))[0] > 3600]
+                if need:
+                    async with session.get(
+                        "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+                        params={"userIds": ",".join(map(str, need)), "size": "150x150", "format": "Png", "isCircular": "false"},
+                    ) as r:
+                        if r.status == 200:
+                            for item in (await r.json()).get("data", []):
+                                if item.get("state") == "Completed" and item.get("imageUrl"):
+                                    async with session.get(item["imageUrl"]) as img:
+                                        if img.status == 200:
+                                            self.avatar_cache[item["targetId"]] = (now, await img.read())
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        avatars = {i: self.avatar_cache[i][1] for i in ids if i in self.avatar_cache}
+        out = []
+        for p in players:
+            p = dict(p)
+            rid = p.get("roblox_id")
+            if rid in self.profile_cache:
+                _, p["display"], p["username"] = self.profile_cache[rid]
+            elif rid:
+                p["username"] = p["name"]
+            out.append(p)
+        return out, avatars
+
     async def _render_file(self) -> discord.File:
-        players = list(load_players().values())
-        png = await asyncio.to_thread(leaderboard_image.render, players)
+        players, avatars = await self._enrich(list(load_players().values()))
+        png = await asyncio.to_thread(leaderboard_image.render, players, avatars)
         return discord.File(fp=io.BytesIO(png), filename="leaderboard.png")
 
     async def refresh(self) -> Optional[str]:
@@ -372,6 +420,7 @@ class Leaderboard(commands.Cog):
         links[str(interaction.user.id)] = {"roblox_id": pend["roblox_id"], "name": pend["name"]}
         _save(LINKS_FILE, links)
         ROBLOX_NAMES[interaction.user.id] = pend["name"]
+        ROBLOX_IDS[interaction.user.id] = pend["roblox_id"]
         self.pending.pop(interaction.user.id, None)
         await interaction.followup.send(
             f"تم ربط حسابك: **{pend['name']}** ✅\nتقدر تحذف الكود من وصفك، وتسجل بالمباريات الحين.", ephemeral=True
@@ -532,6 +581,8 @@ class Leaderboard(commands.Cog):
             key = f"id:{u.id}"
             rec = data.get(key, {"points": 0, "streak": 0, "best": 0})
             rec["name"] = ROBLOX_NAMES.get(u.id, u.display_name)
+            if ROBLOX_IDS.get(u.id):
+                rec["roblox_id"] = ROBLOX_IDS[u.id]
             if u in winners:
                 rec["points"] += WIN_POINTS
                 rec["streak"] += 1
@@ -635,6 +686,7 @@ class Leaderboard(commands.Cog):
             return
         _save(LINKS_FILE, links)
         ROBLOX_NAMES.pop(target.id, None)
+        ROBLOX_IDS.pop(target.id, None)
         await interaction.response.send_message(f"تم فك ربط {target.display_name} ✅", ephemeral=True)
 
     @app_commands.command(name="lb_set", description="يضيف لاعب أو يعدل نقاطه وسلسلة فوزه يدوياً")
