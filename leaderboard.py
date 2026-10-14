@@ -422,6 +422,14 @@ class Leaderboard(commands.Cog):
         ROBLOX_NAMES[interaction.user.id] = pend["name"]
         ROBLOX_IDS[interaction.user.id] = pend["roblox_id"]
         self.pending.pop(interaction.user.id, None)
+        # لو اللاعب عنده سجل في الليدربورد، نربطه بحسابه عشان تطلع صورته
+        players = load_players()
+        record = players.get(f"id:{interaction.user.id}")
+        if record:
+            record["roblox_id"] = pend["roblox_id"]
+            record["name"] = pend["name"]
+            save_players(players)
+            await self.refresh()
         await interaction.followup.send(
             f"تم ربط حسابك: **{pend['name']}** ✅\nتقدر تحذف الكود من وصفك، وتسجل بالمباريات الحين.", ephemeral=True
         )
